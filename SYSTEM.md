@@ -111,7 +111,7 @@ After completing work in this repo:
 
 ## CI/CD
 
-- **Repository:** `anantbairagi/vitaline-inventory-tracker` (pending creation)
+- **Repository:** https://github.com/anantbairagi/vitaline-inventory-tracker
 - **Branch:** `main` auto-deploys via `.github/workflows/deploy.yml`
 - **Required secret:** `FLY_API_TOKEN` in GitHub repo settings
 
@@ -119,14 +119,14 @@ After completing work in this repo:
 
 | Field | Value |
 |-------|-------|
-| **Status** | Pending initial deploy |
+| **Status** | Live |
 | **Fly app** | `vitaline-inventory-tracker` |
 | **Region** | `ord` |
-| **Live URL** | _To be filled after deploy_ |
-| **GitHub** | _To be filled after repo creation_ |
-| **Last deployed** | _Pending_ |
-| **Deployed by** | _Pending_ |
-| **Notes** | First boot seeds sample data from `split/` if volume is empty |
+| **Live URL** | https://vitaline-inventory-tracker.fly.dev/ |
+| **GitHub** | https://github.com/anantbairagi/vitaline-inventory-tracker |
+| **Last deployed** | 2026-06-23 (initial deploy) |
+| **Deployed by** | Cursor agent (local `fly deploy`) |
+| **Notes** | First boot seeds sample data from `split/` if volume is empty. CI/CD secret `FLY_API_TOKEN` configured on GitHub. Volume `dashboard_data` (1 GB) mounted at `/data`. |
 
 ## Troubleshooting
 
