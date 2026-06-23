@@ -126,7 +126,7 @@ After completing work in this repo:
 | **GitHub** | https://github.com/anantbairagi/vitaline-inventory-tracker |
 | **Last deployed** | 2026-06-23 (initial deploy) |
 | **Deployed by** | Cursor agent (local `fly deploy`) |
-| **Notes** | First boot seeds sample data from `split/` if volume is empty. CI/CD secret `FLY_API_TOKEN` configured on GitHub. Volume `dashboard_data` (1 GB) mounted at `/data`. |
+| **Notes** | First boot seeds sample data from `split/` if volume is empty. CI/CD secret `FLY_API_TOKEN` configured on GitHub. Volume `dashboard_data` (1 GB) mounted at `/data`. VM memory 1024 MB for large workbook uploads. Exporter uses openpyxl read-only streaming to avoid OOM. |
 
 ## Troubleshooting
 
