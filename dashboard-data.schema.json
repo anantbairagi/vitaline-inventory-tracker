@@ -1,0 +1,65 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Vitaline Order Dashboard data contract",
+  "description": "Shape of dashboard-data.json consumed by the Vitaline Order Dashboard. Produced by export_dashboard_data.py from the PAR workbook. Any backend that serves data to the dashboard must conform to this schema.",
+  "type": "object",
+  "required": ["controls", "activation", "rows"],
+  "properties": {
+    "generated": {
+      "type": "string",
+      "description": "ISO-8601 timestamp of when this data was produced. Optional but recommended; the dashboard shows it as a 'Data refreshed' stamp.",
+      "examples": ["2026-06-17T15:53:34"]
+    },
+    "controls": {
+      "type": "object",
+      "description": "Header context shown at the top of the dashboard. All strings; formatting is display-ready.",
+      "required": ["booking_start", "booking_end", "snapshot", "demand_basis"],
+      "properties": {
+        "booking_start": { "type": "string", "examples": ["5/2/26"] },
+        "booking_end": { "type": "string", "examples": ["5/29/26"] },
+        "snapshot": { "type": "string", "description": "Inventory snapshot date.", "examples": ["6/12/26"] },
+        "demand_basis": { "type": "string", "examples": ["Formulary Primary"] }
+      }
+    },
+    "activation": {
+      "type": "object",
+      "description": "Per-office on/off switch. Key = office name (must match the office values in rows). Value = 'Y' (active) or 'N' (inactive). Inactive offices are shown greyed and excluded from all network totals. An office missing from this map is treated as active.",
+      "additionalProperties": {
+        "type": "string",
+        "enum": ["Y", "N"]
+      },
+      "examples": [{ "Atlanta": "Y", "Cleveland": "N", "Dayton": "N" }]
+    },
+    "rows": {
+      "type": "array",
+      "description": "One entry per PAR line item where 'Include in PAR' = Y. Each entry is a fixed-order array (not an object) for compactness. The index meaning is below and MUST match the dashboard's COLS map.",
+      "items": {
+        "type": "array",
+        "minItems": 13,
+        "maxItems": 13,
+        "prefixItems": [
+          { "type": "string", "title": "0 office", "description": "Office name. Must match a key in activation." },
+          { "type": "string", "title": "1 vendor", "description": "Vendor name, e.g. Infusive / Medline / TwinMed." },
+          { "type": "string", "title": "2 item", "description": "Order item display name." },
+          { "type": "string", "title": "3 unitBasis", "description": "PAR unit basis, e.g. Vial / Box/Case / Each. Display only." },
+          { "type": "number", "title": "4 unitsPerPack", "description": "Units per order pack." },
+          { "type": "number", "title": "5 pricePerPack", "description": "Price per order pack (USD)." },
+          { "type": "number", "title": "6 onHand", "description": "Latest in-stock quantity, in the item's PAR unit." },
+          { "type": "number", "title": "7 parTarget", "description": "PAR target quantity." },
+          { "type": "number", "title": "8 rop", "description": "Reorder point quantity." },
+          { "type": "number", "title": "9 orderPacks", "description": "Suggested order quantity in packs. 0 unless status is ORDER or Below Target." },
+          { "type": "number", "title": "10 orderUnits", "description": "Suggested order in usable units." },
+          { "type": "number", "title": "11 orderCost", "description": "Suggested order cost (USD). Drives the office's order $ total. 0 unless ordering." },
+          {
+            "type": "string",
+            "title": "12 status",
+            "description": "Item status. Drives tiering and visibility.",
+            "enum": ["ORDER", "Below Target", "OK", "No Demand", "Excluded", "Stock View", "Inactive"]
+          }
+        ],
+        "items": false
+      }
+    }
+  },
+  "$comment": "STATUS SEMANTICS used by the dashboard: 'ORDER' and 'Below Target' are the two 'needs ordering' states — they contribute to an office's order $ and item count. 'OK' is on-track (counts toward tracked total, no order). 'No Demand' and 'Excluded' are tracked-but-irrelevant. 'Stock View' is a display-only row (e.g. the Biotin 30mL secondary line) — never ordered. 'Inactive' appears when an office is toggled off. TIERING: an active office is Critical if >50% of its tracked items need ordering, Watch if 25-50%, Stable if <25%. Tracked = ORDER + Below Target + OK."
+}
