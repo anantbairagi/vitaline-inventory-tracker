@@ -2,15 +2,17 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import shutil
 import tempfile
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
 from pathlib import Path
 
 from fastapi import FastAPI, File, HTTPException, UploadFile
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from exporter.export import ExportError, export_workbook
@@ -19,6 +21,9 @@ ROOT = Path(__file__).resolve().parent.parent
 DATA_DIR = Path(os.environ.get("DATA_DIR", ROOT / "data"))
 STATIC_DIR = ROOT / "split"
 SEED_DIR = STATIC_DIR
+UPLOAD_CHUNK_SIZE = 1024 * 1024
+
+_export_pool = ThreadPoolExecutor(max_workers=1)
 
 
 def _seed_data_if_empty() -> None:
@@ -51,10 +56,20 @@ def _read_json(path: Path) -> dict:
         raise HTTPException(status_code=500, detail="Invalid JSON on disk") from exc
 
 
+async def _save_upload_to_path(upload: UploadFile, dest: Path) -> None:
+    with dest.open("wb") as out:
+        while True:
+            chunk = await upload.read(UPLOAD_CHUNK_SIZE)
+            if not chunk:
+                break
+            out.write(chunk)
+
+
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     _seed_data_if_empty()
     yield
+    _export_pool.shutdown(wait=False)
 
 
 app = FastAPI(title="Vitaline Inventory Tracker", lifespan=lifespan)
@@ -92,20 +107,23 @@ async def upload_workbook(file: UploadFile = File(...)) -> dict:
         raise HTTPException(status_code=400, detail="Only .xlsx workbooks are accepted")
 
     suffix = Path(filename).suffix or ".xlsx"
-    with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
-        tmp_path = Path(tmp.name)
-        try:
-            content = await file.read()
-            if not content:
-                raise HTTPException(status_code=400, detail="Uploaded file is empty")
-            tmp.write(content)
+    fd, tmp_name = tempfile.mkstemp(suffix=suffix)
+    os.close(fd)
+    tmp_path = Path(tmp_name)
+    try:
+        await _save_upload_to_path(file, tmp_path)
+        if tmp_path.stat().st_size == 0:
+            raise HTTPException(status_code=400, detail="Uploaded file is empty")
 
-            try:
-                summary = export_workbook(tmp_path, DATA_DIR)
-            except ExportError as exc:
-                raise HTTPException(status_code=400, detail=str(exc)) from exc
-        finally:
-            tmp_path.unlink(missing_ok=True)
+        loop = asyncio.get_running_loop()
+        try:
+            summary = await loop.run_in_executor(
+                _export_pool, export_workbook, tmp_path, DATA_DIR
+            )
+        except ExportError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+    finally:
+        tmp_path.unlink(missing_ok=True)
 
     return {"ok": True, **summary}
 

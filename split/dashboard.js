@@ -437,6 +437,9 @@ async function uploadWorkbook(file){
   let body = {};
   try { body = await resp.json(); } catch(e){ /* ignore */ }
   if(!resp.ok){
+    if(resp.status === 502 || resp.status === 504){
+      throw new Error('Workbook processing failed on the server (timeout or memory). Please try again in a moment.');
+    }
     throw new Error(body.detail || body.message || ('Upload failed (HTTP ' + resp.status + ')'));
   }
   state.activeOffice = null;

@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import datetime
+import gc
 import json
 from pathlib import Path
 from typing import Any
+from zipfile import BadZipFile
 
 from openpyxl import load_workbook
 
@@ -15,25 +17,24 @@ SHEET_CONTROLS = "Live_Controls"
 REQUIRED_SHEETS = (SHEET_PAR, SHEET_ACTIVATION, SHEET_CONTROLS)
 ROLLING_WEEKS = 12
 
-PAR_COLS = {
-    "office": 1,
-    "include": 2,
-    "vendor": 3,
-    "item": 4,
-    "unit_basis": 7,
-    "units_per_pack": 8,
-    "price_per_pack": 10,
-    "par_target": 21,
-    "rop": 22,
-    "on_hand": 23,
-    "order_packs": 25,
-    "order_units": 26,
-    "order_cost": 27,
-    "status": 29,
+# 0-based column indices when reading PAR_Output rows (cols 1-29).
+PAR_IDX = {
+    "office": 0,
+    "include": 1,
+    "vendor": 2,
+    "item": 3,
+    "unit_basis": 6,
+    "units_per_pack": 7,
+    "price_per_pack": 9,
+    "par_target": 20,
+    "rop": 21,
+    "on_hand": 22,
+    "order_packs": 24,
+    "order_units": 25,
+    "order_cost": 26,
+    "status": 28,
 }
 ACTIVATION_FIRST_ROW, ACTIVATION_LAST_ROW = 5, 23
-CTL_BOOKING_START, CTL_BOOKING_END = "B2", "B3"
-CTL_DEMAND_BASIS, CTL_SNAPSHOT = "B7", "B8"
 
 ROW_FIELD_ORDER = [
     "office",
@@ -81,54 +82,97 @@ def num(v: Any) -> float:
         return 0
 
 
-def build_payload(wb) -> tuple[dict, dict, list]:
-    par = wb[SHEET_PAR]
-    act = wb[SHEET_ACTIVATION]
-    ctl = wb[SHEET_CONTROLS]
-    controls = {
-        "booking_start": fmt_date(ctl[CTL_BOOKING_START].value),
-        "booking_end": fmt_date(ctl[CTL_BOOKING_END].value),
-        "snapshot": fmt_date(ctl[CTL_SNAPSHOT].value),
-        "demand_basis": str(ctl[CTL_DEMAND_BASIS].value or ""),
-    }
-    activation: dict[str, str] = {}
-    for r in range(ACTIVATION_FIRST_ROW, ACTIVATION_LAST_ROW + 1):
-        office = act.cell(r, 1).value
-        if office not in (None, ""):
-            activation[str(office)] = str(act.cell(r, 2).value or "Y")
-    rows: list[list] = []
-    for r in range(2, par.max_row + 1):
-        office = par.cell(r, PAR_COLS["office"]).value
-        if office in (None, ""):
-            continue
-        if str(par.cell(r, PAR_COLS["include"]).value) != "Y":
-            continue
-        rec = {
-            "office": str(office),
-            "vendor": str(par.cell(r, PAR_COLS["vendor"]).value or ""),
-            "item": str(par.cell(r, PAR_COLS["item"]).value or ""),
-            "unit_basis": str(par.cell(r, PAR_COLS["unit_basis"]).value or ""),
-            "units_per_pack": num(par.cell(r, PAR_COLS["units_per_pack"]).value),
-            "price_per_pack": num(par.cell(r, PAR_COLS["price_per_pack"]).value),
-            "on_hand": num(par.cell(r, PAR_COLS["on_hand"]).value),
-            "par_target": num(par.cell(r, PAR_COLS["par_target"]).value),
-            "rop": num(par.cell(r, PAR_COLS["rop"]).value),
-            "order_packs": num(par.cell(r, PAR_COLS["order_packs"]).value),
-            "order_units": num(par.cell(r, PAR_COLS["order_units"]).value),
-            "order_cost": num(par.cell(r, PAR_COLS["order_cost"]).value),
-            "status": str(par.cell(r, PAR_COLS["status"]).value or ""),
-        }
-        rows.append([rec[f] for f in ROW_FIELD_ORDER])
-    return controls, activation, rows
-
-
-def _validate_workbook(wb) -> None:
-    missing = [sheet for sheet in REQUIRED_SHEETS if sheet not in wb.sheetnames]
+def _validate_sheetnames(sheetnames: list[str]) -> None:
+    missing = [sheet for sheet in REQUIRED_SHEETS if sheet not in sheetnames]
     if missing:
-        found = ", ".join(wb.sheetnames)
+        found = ", ".join(sheetnames)
         raise ExportError(
             f"Expected sheet(s) {', '.join(missing)} not found. Found: {found}"
         )
+
+
+def _read_controls(ctl) -> dict[str, str]:
+    booking_start = booking_end = demand_basis = snapshot = None
+    for row_idx, row in enumerate(
+        ctl.iter_rows(min_row=1, max_row=8, min_col=2, max_col=2, values_only=True),
+        start=1,
+    ):
+        val = row[0] if row else None
+        if row_idx == 2:
+            booking_start = val
+        elif row_idx == 3:
+            booking_end = val
+        elif row_idx == 7:
+            demand_basis = val
+        elif row_idx == 8:
+            snapshot = val
+    return {
+        "booking_start": fmt_date(booking_start),
+        "booking_end": fmt_date(booking_end),
+        "snapshot": fmt_date(snapshot),
+        "demand_basis": str(demand_basis or ""),
+        "_snapshot_raw": snapshot,
+    }
+
+
+def _read_activation(act) -> dict[str, str]:
+    activation: dict[str, str] = {}
+    for row in act.iter_rows(
+        min_row=ACTIVATION_FIRST_ROW,
+        max_row=ACTIVATION_LAST_ROW,
+        min_col=1,
+        max_col=2,
+        values_only=True,
+    ):
+        office = row[0] if row else None
+        if office not in (None, ""):
+            active = row[1] if len(row) > 1 else "Y"
+            activation[str(office)] = str(active or "Y")
+    return activation
+
+
+def _read_par_rows(par) -> list[list]:
+    rows: list[list] = []
+    for row in par.iter_rows(min_row=2, min_col=1, max_col=29, values_only=True):
+        if not row:
+            continue
+        office = row[PAR_IDX["office"]]
+        if office in (None, ""):
+            continue
+        include = row[PAR_IDX["include"]]
+        if str(include) != "Y":
+            continue
+        rec = {
+            "office": str(office),
+            "vendor": str(row[PAR_IDX["vendor"]] or ""),
+            "item": str(row[PAR_IDX["item"]] or ""),
+            "unit_basis": str(row[PAR_IDX["unit_basis"]] or ""),
+            "units_per_pack": num(row[PAR_IDX["units_per_pack"]]),
+            "price_per_pack": num(row[PAR_IDX["price_per_pack"]]),
+            "on_hand": num(row[PAR_IDX["on_hand"]]),
+            "par_target": num(row[PAR_IDX["par_target"]]),
+            "rop": num(row[PAR_IDX["rop"]]),
+            "order_packs": num(row[PAR_IDX["order_packs"]]),
+            "order_units": num(row[PAR_IDX["order_units"]]),
+            "order_cost": num(row[PAR_IDX["order_cost"]]),
+            "status": str(row[PAR_IDX["status"]] or ""),
+        }
+        rows.append([rec[f] for f in ROW_FIELD_ORDER])
+    return rows
+
+
+def build_payload(wb) -> tuple[dict, dict, list, Any]:
+    """Build dashboard payload using streaming reads (read-only workbooks)."""
+    ctl = wb[SHEET_CONTROLS]
+    act = wb[SHEET_ACTIVATION]
+    par = wb[SHEET_PAR]
+
+    controls_raw = _read_controls(ctl)
+    snapshot_raw = controls_raw.pop("_snapshot_raw")
+    controls = controls_raw
+    activation = _read_activation(act)
+    rows = _read_par_rows(par)
+    return controls, activation, rows, snapshot_raw
 
 
 def export_workbook(in_path: Path, out_dir: Path) -> dict[str, Any]:
@@ -141,11 +185,19 @@ def export_workbook(in_path: Path, out_dir: Path) -> dict[str, Any]:
     snap_dir = out_dir / "snapshots"
     snap_dir.mkdir(parents=True, exist_ok=True)
 
-    wb = load_workbook(in_path, data_only=True)
-    _validate_workbook(wb)
+    wb = None
+    try:
+        wb = load_workbook(in_path, read_only=True, data_only=True)
+        _validate_sheetnames(wb.sheetnames)
+        controls, activation, rows, snapshot_raw = build_payload(wb)
+    except BadZipFile as exc:
+        raise ExportError("Invalid or corrupted .xlsx file") from exc
+    finally:
+        if wb is not None:
+            wb.close()
+        gc.collect()
 
-    controls, activation, rows = build_payload(wb)
-    snap_key = snapshot_iso(wb[SHEET_CONTROLS][CTL_SNAPSHOT].value)
+    snap_key = snapshot_iso(snapshot_raw)
     generated = datetime.datetime.now().isoformat(timespec="seconds")
 
     payload = {
